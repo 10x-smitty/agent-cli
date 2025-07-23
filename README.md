@@ -119,6 +119,33 @@ Follow the existing code style and patterns in this project.
 
 Grok will automatically load and follow these instructions when working in your project directory. The custom instructions are added to Grok's system prompt and take priority over default behavior.
 
+## Multi-LLM Integration Roadmap
+
+**⚠️ IMPORTANT**: This project is currently undergoing a major architectural transformation to support multiple LLM providers (Claude, OpenAI, Gemini, Ollama, LM Studio, OpenRouter) and MCP (Model Context Protocol) integration.
+
+### For AI Agents & Developers
+
+**BEFORE starting any work on this project:**
+
+1. **READ** the project rules: [`PROJECT_RULES.md`](./PROJECT_RULES.md)
+2. **REVIEW** the development roadmap: [`/roadmap/README.md`](./roadmap/README.md)
+3. **UNDERSTAND** the current phase and implementation requirements
+4. **FOLLOW** the mandatory documentation-first protocol
+
+### Current Development Status
+
+- **Active Phase**: Phase 1 - Core Abstraction Layer
+- **Goal**: Create universal interfaces for multi-LLM support
+- **Priority**: Maintain backward compatibility with existing Grok functionality
+- **Next**: Multi-provider implementation and MCP integration
+
+### Development Documentation
+
+- **[Project Rules](./PROJECT_RULES.md)** - Mandatory protocols for AI agents
+- **[Roadmap Overview](./roadmap/README.md)** - Complete development plan
+- **[Phase 1 Guide](./roadmap/phase1-core-abstraction.md)** - Current implementation focus
+- **[Custom Instructions](./.grok/GROK.md)** - Project-specific AI behavior
+
 ## Example Conversations
 
 Instead of typing commands, just tell Grok what you want to do:
