@@ -1,12 +1,12 @@
 import React, { useState } from "react";
 import { Box, Text, useInput, useApp } from "ink";
-import { GrokAgent } from "../../agent/grok-agent";
+import { UniversalAgent } from "../../agent/universal-agent";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
 interface ApiKeyInputProps {
-  onApiKeySet: (agent: GrokAgent) => void;
+  onApiKeySet: (agent: UniversalAgent) => void;
 }
 
 interface UserSettings {
@@ -55,7 +55,7 @@ export default function ApiKeyInput({ onApiKeySet }: ApiKeyInputProps) {
     setIsSubmitting(true);
     try {
       const apiKey = input.trim();
-      const agent = new GrokAgent(apiKey);
+      const agent = new UniversalAgent(apiKey);
       
       // Set environment variable for current process
       process.env.GROK_API_KEY = apiKey;

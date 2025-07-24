@@ -1,17 +1,24 @@
-import { GrokClient, GrokMessage, GrokToolCall } from "../grok/client";
+import { UniversalAgentBase } from './universal-agent-base';
+import { GrokProvider } from '../providers/grok-provider';
+import { OpenAIProvider } from '../providers/openai-provider';
+import { ProviderFactory } from '../providers/provider-factory';
+import { OpenAICompatibleConfig } from '../types/provider-config';
+import { UniversalMessage, UniversalTool, UniversalToolCall, StreamingChunk as UniversalStreamingChunk } from '../types/llm-types';
+import { GrokClient, GrokToolCall, GrokMessage } from '../grok/client';
 import { GROK_TOOLS } from "../grok/tools";
 import { TextEditorTool, BashTool, TodoTool, ConfirmationTool } from "../tools";
 import { ToolResult } from "../types";
-import { EventEmitter } from "events";
 import { createTokenCounter, TokenCounter } from "../utils/token-counter";
 import { loadCustomInstructions } from "../utils/custom-instructions";
+import { BaseLLMProvider } from '../providers/base-provider';
 
+// Backward compatibility interfaces - kept for existing integrations
 export interface ChatEntry {
   type: "user" | "assistant" | "tool_result" | "tool_call";
   content: string;
   timestamp: Date;
-  toolCalls?: GrokToolCall[];
-  toolCall?: GrokToolCall;
+  toolCalls?: UniversalToolCall[];
+  toolCall?: UniversalToolCall;
   toolResult?: { success: boolean; output?: string; error?: string };
   isStreaming?: boolean;
 }
@@ -19,41 +26,101 @@ export interface ChatEntry {
 export interface StreamingChunk {
   type: "content" | "tool_calls" | "tool_result" | "done" | "token_count";
   content?: string;
-  toolCalls?: GrokToolCall[];
-  toolCall?: GrokToolCall;
+  toolCalls?: UniversalToolCall[];
+  toolCall?: UniversalToolCall;
   toolResult?: ToolResult;
   tokenCount?: number;
 }
 
-export class GrokAgent extends EventEmitter {
-  private grokClient: GrokClient;
+/**
+ * GrokAgent - Refactored to use Universal Architecture
+ * 
+ * This class maintains full backward compatibility while leveraging
+ * the new provider abstraction system for future extensibility.
+ */
+export class GrokAgent extends UniversalAgentBase {
+  // Backward compatibility - these properties are kept for existing integrations  
   private textEditor: TextEditorTool;
   private bash: BashTool;
   private todoTool: TodoTool;
   private confirmationTool: ConfirmationTool;
   private chatHistory: ChatEntry[] = [];
-  private messages: GrokMessage[] = [];
   private tokenCounter: TokenCounter;
   private abortController: AbortController | null = null;
+  private legacyMessages: GrokMessage[] = []; // For backward compatibility
+  private grokClient: GrokClient; // Direct client access for streaming
+  private currentProvider: BaseLLMProvider;
+  private grokProvider: GrokProvider;
+  private openAIProvider: OpenAIProvider | null = null;
 
   constructor(apiKey: string, baseURL?: string) {
-    super();
-    this.grokClient = new GrokClient(apiKey, undefined, baseURL);
+    // Create the GrokProvider and initialize the base class
+    const grokConfig: OpenAICompatibleConfig = {
+      type: 'grok',
+      name: 'Grok',
+      apiKey: apiKey,
+      baseURL: baseURL || process.env.GROK_BASE_URL || 'https://api.x.ai/v1',
+      timeout: 360000,
+    };
+
+    // Create provider instance
+    const provider = new GrokProvider(grokConfig);
+    
+    // Initialize base class with provider
+    super(provider);
+    
+    // Store provider references
+    this.grokProvider = provider;
+    this.currentProvider = provider;
+    
+    // Initialize OpenAI provider if API key is available
+    if (process.env.OPENAI_API_KEY) {
+      const openAIConfig: OpenAICompatibleConfig = {
+        type: 'openai',
+        name: 'OpenAI',
+        apiKey: process.env.OPENAI_API_KEY,
+        baseURL: process.env.OPENAI_BASE_URL,
+        timeout: 60000,
+      };
+      this.openAIProvider = new OpenAIProvider(openAIConfig);
+      // Initialize the OpenAI provider
+      this.openAIProvider.initialize().catch(error => {
+        console.warn('Failed to initialize OpenAI provider:', error.message);
+        this.openAIProvider = null;
+      });
+    }
+
+    // Initialize tool instances
     this.textEditor = new TextEditorTool();
     this.bash = new BashTool();
     this.todoTool = new TodoTool();
     this.confirmationTool = new ConfirmationTool();
     this.tokenCounter = createTokenCounter("grok-4-latest");
+    
+    // Initialize grok client for backward compatibility streaming
+    this.grokClient = new GrokClient(apiKey, undefined, baseURL);
 
-    // Load custom instructions
+    // Convert GROK_TOOLS to UniversalTool format and set them
+    const universalTools: UniversalTool[] = GROK_TOOLS.map(tool => ({
+      type: 'function' as const,
+      function: tool.function,
+    }));
+    
+    this.setTools(universalTools);
+
+    // Initialize provider asynchronously  
+    provider.initialize().catch(error => {
+      console.error('Failed to initialize Grok provider:', error);
+    });
+
+    // Initialize system message for the universal agent
     const customInstructions = loadCustomInstructions();
     const customInstructionsSection = customInstructions
       ? `\n\nCUSTOM INSTRUCTIONS:\n${customInstructions}\n\nThe above custom instructions should be followed alongside the standard instructions below.`
       : "";
 
-    // Initialize with system message
-    this.messages.push({
-      role: "system",
+    const systemMessage: UniversalMessage = {
+      role: 'system',
       content: `You are Grok CLI, an AI assistant that helps with file editing, coding tasks, and system operations.${customInstructionsSection}
 
 You have access to these tools:
@@ -109,155 +176,41 @@ IMPORTANT RESPONSE GUIDELINES:
 - Keep responses concise and focused on the actual work being done
 - If a tool execution completes the user's request, you can remain silent or give a brief confirmation
 
-Current working directory: ${process.cwd()}`,
-    });
+Current working directory: ${process.cwd()}`
+    };
+
+    // Initialize universal agent with system message
+    this.addMessage(systemMessage);
   }
 
-  async processUserMessage(message: string): Promise<ChatEntry[]> {
-    // Add user message to conversation
+  /**
+   * Backward compatible method that uses the new universal architecture
+   * Returns ChatEntry format for existing integrations
+   */
+  async processUserMessageLegacy(message: string): Promise<ChatEntry[]> {
     const userEntry: ChatEntry = {
       type: "user",
       content: message,
       timestamp: new Date(),
     };
     this.chatHistory.push(userEntry);
-    this.messages.push({ role: "user", content: message });
-
     const newEntries: ChatEntry[] = [userEntry];
-    const maxToolRounds = 10; // Prevent infinite loops
-    let toolRounds = 0;
 
     try {
-      let currentResponse = await this.grokClient.chat(
-        this.messages,
-        GROK_TOOLS,
-        undefined,
-        { search_parameters: { mode: "auto" } }
-      );
-
-      // Agent loop - continue until no more tool calls or max rounds reached
-      while (toolRounds < maxToolRounds) {
-        const assistantMessage = currentResponse.choices[0]?.message;
-
-        if (!assistantMessage) {
-          throw new Error("No response from Grok");
-        }
-
-        // Handle tool calls
-        if (
-          assistantMessage.tool_calls &&
-          assistantMessage.tool_calls.length > 0
-        ) {
-          toolRounds++;
-
-          // Add assistant message with tool calls
-          const assistantEntry: ChatEntry = {
-            type: "assistant",
-            content: assistantMessage.content || "Using tools to help you...",
-            timestamp: new Date(),
-            toolCalls: assistantMessage.tool_calls,
-          };
-          this.chatHistory.push(assistantEntry);
-          newEntries.push(assistantEntry);
-
-          // Add assistant message to conversation
-          this.messages.push({
-            role: "assistant",
-            content: assistantMessage.content || "",
-            tool_calls: assistantMessage.tool_calls,
-          } as any);
-
-          // Create initial tool call entries to show tools are being executed
-          assistantMessage.tool_calls.forEach((toolCall) => {
-            const toolCallEntry: ChatEntry = {
-              type: "tool_call",
-              content: "Executing...",
-              timestamp: new Date(),
-              toolCall: toolCall,
-            };
-            this.chatHistory.push(toolCallEntry);
-            newEntries.push(toolCallEntry);
-          });
-
-          // Execute tool calls and update the entries
-          for (const toolCall of assistantMessage.tool_calls) {
-            const result = await this.executeTool(toolCall);
-
-            // Update the existing tool_call entry with the result
-            const entryIndex = this.chatHistory.findIndex(
-              (entry) =>
-                entry.type === "tool_call" && entry.toolCall?.id === toolCall.id
-            );
-
-            if (entryIndex !== -1) {
-              const updatedEntry: ChatEntry = {
-                ...this.chatHistory[entryIndex],
-                type: "tool_result",
-                content: result.success
-                  ? result.output || "Success"
-                  : result.error || "Error occurred",
-                toolResult: result,
-              };
-              this.chatHistory[entryIndex] = updatedEntry;
-
-              // Also update in newEntries for return value
-              const newEntryIndex = newEntries.findIndex(
-                (entry) =>
-                  entry.type === "tool_call" &&
-                  entry.toolCall?.id === toolCall.id
-              );
-              if (newEntryIndex !== -1) {
-                newEntries[newEntryIndex] = updatedEntry;
-              }
-            }
-
-            // Add tool result to messages with proper format (needed for AI context)
-            this.messages.push({
-              role: "tool",
-              content: result.success
-                ? result.output || "Success"
-                : result.error || "Error",
-              tool_call_id: toolCall.id,
-            });
-          }
-
-          // Get next response - this might contain more tool calls
-          currentResponse = await this.grokClient.chat(
-            this.messages,
-            GROK_TOOLS,
-            undefined,
-            { search_parameters: { mode: "auto" } }
-          );
-        } else {
-          // No more tool calls, add final response
-          const finalEntry: ChatEntry = {
-            type: "assistant",
-            content:
-              assistantMessage.content ||
-              "I understand, but I don't have a specific response.",
-            timestamp: new Date(),
-          };
-          this.chatHistory.push(finalEntry);
-          this.messages.push({
-            role: "assistant",
-            content: assistantMessage.content || "",
-          });
-          newEntries.push(finalEntry);
-          break; // Exit the loop
-        }
-      }
-
-      if (toolRounds >= maxToolRounds) {
-        const warningEntry: ChatEntry = {
-          type: "assistant",
-          content:
-            "Maximum tool execution rounds reached. Stopping to prevent infinite loops.",
-          timestamp: new Date(),
-        };
-        this.chatHistory.push(warningEntry);
-        newEntries.push(warningEntry);
-      }
-
+      // Use the universal agent's processUserMessage method
+      const response = await super.processUserMessage(message);
+      
+      // Convert UniversalMessage response to ChatEntry format for backward compatibility
+      const assistantEntry: ChatEntry = {
+        type: "assistant",
+        content: response.content || "I understand, but I don't have a specific response.",
+        timestamp: new Date(),
+        toolCalls: response.tool_calls,
+      };
+      
+      this.chatHistory.push(assistantEntry);
+      newEntries.push(assistantEntry);
+      
       return newEntries;
     } catch (error: any) {
       const errorEntry: ChatEntry = {
@@ -270,6 +223,108 @@ Current working directory: ${process.cwd()}`,
     }
   }
 
+  /**
+   * Override the base class tool handling with our existing tool implementations
+   * This ensures backward compatibility with existing tool system
+   */
+  protected async *handleToolCalls(
+    toolCalls: UniversalToolCall[]
+  ): AsyncGenerator<import('../types/llm-types').StreamingChunk, void, unknown> {
+    for (const toolCall of toolCalls) {
+      this.emit('tool-execution-started', toolCall);
+      
+      try {
+        // Execute the tool using our existing system
+        const result = await this.executeUniversalTool(toolCall);
+        
+        // Add tool result to conversation history 
+        const toolResultMessage: UniversalMessage = {
+          role: 'tool',
+          content: result.success
+            ? result.output || 'Success'
+            : result.error || 'Error',
+          tool_call_id: toolCall.id,
+        };
+        
+        this.addMessage(toolResultMessage);
+        
+        // Yield the tool result for streaming interface
+        yield {
+          type: 'content',
+          content: result.success
+            ? result.output || 'Success'
+            : `Error: ${result.error || 'Unknown error'}`,
+        };
+        
+        this.emit('tool-execution-completed', toolCall, result);
+      } catch (error: any) {
+        const errorResult = {
+          success: false,
+          error: `Tool execution error: ${error.message}`,
+        };
+        
+        yield {
+          type: 'content',
+          content: `Error executing ${toolCall.function.name}: ${error.message}`,
+        };
+        
+        this.emit('tool-execution-completed', toolCall, errorResult);
+      }
+    }
+  }
+
+  /**
+   * Execute a universal tool call using our existing tool implementations
+   */
+  private async executeUniversalTool(toolCall: UniversalToolCall): Promise<ToolResult> {
+    try {
+      const args = JSON.parse(toolCall.function.arguments);
+
+      switch (toolCall.function.name) {
+        case "view_file":
+          const range: [number, number] | undefined =
+            args.start_line && args.end_line
+              ? [args.start_line, args.end_line]
+              : undefined;
+          return await this.textEditor.view(args.path, range);
+
+        case "create_file":
+          return await this.textEditor.create(args.path, args.content);
+
+        case "str_replace_editor":
+          return await this.textEditor.strReplace(
+            args.path,
+            args.old_str,
+            args.new_str,
+            args.replace_all
+          );
+
+        case "bash":
+          return await this.bash.execute(args.command);
+
+        case "create_todo_list":
+          return await this.todoTool.createTodoList(args.todos);
+
+        case "update_todo_list":
+          return await this.todoTool.updateTodoList(args.updates);
+
+        default:
+          return {
+            success: false,
+            error: `Unknown tool: ${toolCall.function.name}`,
+          };
+      }
+    } catch (error: any) {
+      return {
+        success: false,
+        error: `Tool execution error: ${error.message}`,
+      };
+    }
+  }
+
+  /**
+   * Accumulates partial message content from streaming responses
+   */
   private messageReducer(previous: any, item: any): any {
     const reduce = (acc: any, delta: any) => {
       acc = { ...acc };
@@ -300,7 +355,11 @@ Current working directory: ${process.cwd()}`,
     return reduce(previous, item.choices[0]?.delta || {});
   }
 
-  async *processUserMessageStream(
+  /**
+   * Backward compatible streaming method using universal architecture where possible
+   * but maintaining existing token counting and UI feedback
+   */
+  async *processUserMessageStreamLegacy(
     message: string
   ): AsyncGenerator<StreamingChunk, void, unknown> {
     // Create new abort controller for this request
@@ -313,11 +372,11 @@ Current working directory: ${process.cwd()}`,
       timestamp: new Date(),
     };
     this.chatHistory.push(userEntry);
-    this.messages.push({ role: "user", content: message });
+    this.legacyMessages.push({ role: "user", content: message });
 
     // Calculate input tokens
     const inputTokens = this.tokenCounter.countMessageTokens(
-      this.messages as any
+      this.legacyMessages as any
     );
     yield {
       type: "token_count",
@@ -343,7 +402,7 @@ Current working directory: ${process.cwd()}`,
 
         // Stream response and accumulate
         const stream = this.grokClient.chatStream(
-          this.messages,
+          this.legacyMessages,
           GROK_TOOLS,
           undefined,
           { search_parameters: { mode: "auto" } }
@@ -415,7 +474,7 @@ Current working directory: ${process.cwd()}`,
         this.chatHistory.push(assistantEntry);
 
         // Add accumulated message to conversation
-        this.messages.push({
+        this.legacyMessages.push({
           role: "assistant",
           content: accumulatedMessage.content || "",
           tool_calls: accumulatedMessage.tool_calls,
@@ -465,7 +524,7 @@ Current working directory: ${process.cwd()}`,
             };
 
             // Add tool result with proper format (needed for AI context)
-            this.messages.push({
+            this.legacyMessages.push({
               role: "tool",
               content: result.success
                 ? result.output || "Success"
@@ -577,19 +636,55 @@ Current working directory: ${process.cwd()}`,
   }
 
   getCurrentModel(): string {
-    return this.grokClient.getCurrentModel();
+    return this.currentProvider.getCurrentModel();
   }
 
-  setModel(model: string): void {
-    this.grokClient.setModel(model);
-    // Update token counter for new model
-    this.tokenCounter.dispose();
-    this.tokenCounter = createTokenCounter(model);
+  async setModel(model: string): Promise<void> {
+    try {
+      // Determine which provider this model belongs to
+      const isGrokModel = ['grok-4-latest', 'grok-3-latest', 'grok-3-fast', 'grok-3-mini-fast'].includes(model);
+      const isOpenAIModel = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'].includes(model);
+      
+      if (isGrokModel) {
+        // Switch to Grok provider
+        this.currentProvider = this.grokProvider;
+        this.grokClient.setModel(model);
+        this.grokProvider.setModel(model);
+        // Update the base class provider
+        this.provider = this.grokProvider;
+      } else if (isOpenAIModel && this.openAIProvider) {
+        // Switch to OpenAI provider
+        this.currentProvider = this.openAIProvider;
+        this.openAIProvider.setModel(model);
+        // Update the base class provider
+        this.provider = this.openAIProvider;
+      } else {
+        throw new Error(`Unsupported model: ${model}. Please ensure the corresponding provider is configured.`);
+      }
+      
+      // Update token counter for new model
+      this.tokenCounter.dispose();
+      this.tokenCounter = createTokenCounter(model);
+      
+    } catch (error: any) {
+      throw new Error(`Failed to switch to model ${model}: ${error.message}`);
+    }
   }
 
   abortCurrentOperation(): void {
     if (this.abortController) {
       this.abortController.abort();
     }
+  }
+
+  // Backward compatibility aliases for existing UI code
+  async processUserMessageUI(message: string): Promise<ChatEntry[]> {
+    return this.processUserMessageLegacy(message);
+  }
+
+  async *processUserMessageStreamUI(
+    message: string
+  ): AsyncGenerator<StreamingChunk, void, unknown> {
+    yield* this.processUserMessageStreamLegacy(message);
   }
 }

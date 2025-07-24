@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { ChatEntry } from "../../agent/grok-agent";
+import { ChatEntry } from "../../agent/universal-agent";
 import { DiffRenderer } from "./diff-renderer";
 import { MarkdownRenderer } from "../utils/markdown-renderer";
 
@@ -74,6 +74,19 @@ export function ChatHistory({
                   // If no tool calls, render as markdown
                   <MarkdownRenderer content={entry.content.trim()} />
                 )}
+                {entry.isStreaming && <Text color="cyan">█</Text>}
+              </Box>
+            </Box>
+          </Box>
+        );
+
+      case "response":
+        return (
+          <Box key={index} flexDirection="column" marginTop={1}>
+            <Box flexDirection="row" alignItems="flex-start">
+              <Text color="green">⏺ </Text>
+              <Box flexDirection="column" flexGrow={1}>
+                <MarkdownRenderer content={entry.content.trim()} />
                 {entry.isStreaming && <Text color="cyan">█</Text>}
               </Box>
             </Box>

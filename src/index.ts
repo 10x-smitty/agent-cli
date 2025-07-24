@@ -4,11 +4,14 @@ import React from "react";
 import { render } from "ink";
 import { program } from "commander";
 import * as dotenv from "dotenv";
-import { GrokAgent } from "./agent/grok-agent";
+import { UniversalAgent } from "./agent/universal-agent";
 import ChatInterface from "./ui/components/chat-interface";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+
+// Import providers to ensure registration
+import "./providers";
 
 // Load environment variables
 dotenv.config();
@@ -85,9 +88,9 @@ program
       // Get API key from options, environment, or user settings
       const apiKey = options.apiKey || loadApiKey();
       const baseURL = options.baseUrl || loadBaseURL();
-      const agent = apiKey ? new GrokAgent(apiKey, baseURL) : undefined;
+      const agent = apiKey ? new UniversalAgent(apiKey, baseURL) : undefined;
 
-      console.log("🤖 Starting Grok CLI Conversational Assistant...\n");
+      console.log("🤖 Starting Agent CLI Conversational Assistant...\n");
 
       render(React.createElement(ChatInterface, { agent }));
     } catch (error: any) {

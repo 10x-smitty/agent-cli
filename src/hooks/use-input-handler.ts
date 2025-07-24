@@ -1,10 +1,11 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useInput, useApp } from "ink";
-import { GrokAgent, ChatEntry } from "../agent/grok-agent";
+import { UniversalAgent, ChatEntry } from "../agent/universal-agent";
+import { StreamingChunk } from "../types/llm-types";
 import { ConfirmationService } from "../utils/confirmation-service";
 
 interface UseInputHandlerProps {
-  agent: GrokAgent;
+  agent: UniversalAgent;
   chatHistory: ChatEntry[];
   setChatHistory: React.Dispatch<React.SetStateAction<ChatEntry[]>>;
   setIsProcessing: (processing: boolean) => void;
@@ -55,18 +56,22 @@ export function useInputHandler({
   const commandSuggestions: CommandSuggestion[] = [
     { command: "/help", description: "Show help information" },
     { command: "/clear", description: "Clear chat history" },
-    { command: "/models", description: "Switch Grok Model" },
+    { command: "/models", description: "Switch AI Model (Grok/OpenAI)" },
     { command: "/exit", description: "Exit the application" },
   ];
 
-  const availableModels: ModelOption[] = [
-    {
-      model: "grok-4-latest",
-      description: "Latest Grok-4 model (most capable)",
-    },
-    { model: "grok-3-latest", description: "Latest Grok-3 model" },
-    { model: "grok-3-fast", description: "Fast Grok-3 variant" },
-    { model: "grok-3-mini-fast", description: "Fastest Grok-3 variant" },
+const availableModels: ModelOption[] = [
+    // Grok Models
+    { model: "grok-4-latest", description: "Grok Model: Latest Grok-4 (most capable)" },
+    { model: "grok-3-latest", description: "Grok Model: Latest Grok-3" },
+    { model: "grok-3-fast", description: "Grok Model: Fast Grok-3 variant" },
+    { model: "grok-3-mini-fast", description: "Grok Model: Fastest Grok-3 variant" },
+    // OpenAI Models
+    { model: "gpt-4o", description: "OpenAI Model: GPT-4 Omni (multimodal)" },
+    { model: "gpt-4o-mini", description: "OpenAI Model: GPT-4 Omni Mini" },
+    { model: "gpt-4-turbo", description: "OpenAI Model: GPT-4 Turbo" },
+    { model: "gpt-4", description: "OpenAI Model: GPT-4" },
+    { model: "gpt-3.5-turbo", description: "OpenAI Model: GPT-3.5 Turbo" },
   ];
 
   const handleDirectCommand = async (input: string): Promise<boolean> => {
@@ -94,12 +99,12 @@ export function useInputHandler({
     if (trimmedInput === "/help") {
       const helpEntry: ChatEntry = {
         type: "assistant",
-        content: `Grok CLI Help:
+        content: `Agent CLI Help:
 
 Built-in Commands:
   /clear      - Clear chat history
   /help       - Show this help
-  /models     - Switch Grok models
+  /models     - Switch AI models (Grok/OpenAI)
   /exit       - Exit application
   exit, quit  - Exit application
   
@@ -138,13 +143,22 @@ Examples:
       const modelNames = availableModels.map((m) => m.model);
 
       if (modelNames.includes(modelArg)) {
-        agent.setModel(modelArg);
-        const confirmEntry: ChatEntry = {
-          type: "assistant",
-          content: `✓ Switched to model: ${modelArg}`,
-          timestamp: new Date(),
-        };
-        setChatHistory((prev) => [...prev, confirmEntry]);
+        try {
+          await agent.setModel(modelArg);
+          const confirmEntry: ChatEntry = {
+            type: "assistant",
+            content: `✓ Switched to model: ${modelArg}`,
+            timestamp: new Date(),
+          };
+          setChatHistory((prev) => [...prev, confirmEntry]);
+        } catch (error: any) {
+          const errorEntry: ChatEntry = {
+            type: "assistant",
+            content: `Error switching to model: ${error.message}`,
+            timestamp: new Date(),
+          };
+          setChatHistory((prev) => [...prev, errorEntry]);
+        }
       } else {
         const errorEntry: ChatEntry = {
           type: "assistant",
@@ -235,7 +249,7 @@ Available models: ${modelNames.join(", ")}`,
       setIsStreaming(true);
       let streamingEntry: ChatEntry | null = null;
 
-      for await (const chunk of agent.processUserMessageStream(userInput)) {
+      for await (const chunk of agent.processUserMessageStreamUI(userInput)) {
         switch (chunk.type) {
           case "content":
             if (chunk.content) {
@@ -320,6 +334,29 @@ Available models: ${modelNames.join(", ")}`,
                 })
               );
               streamingEntry = null;
+            }
+            break;
+
+          case "response":
+            if (chunk.content) {
+              if (!streamingEntry) {
+                const newStreamingEntry = {
+                  type: "response" as const,
+                  content: chunk.content,
+                  timestamp: new Date(),
+                  isStreaming: true,
+                };
+                setChatHistory((prev) => [...prev, newStreamingEntry]);
+                streamingEntry = newStreamingEntry;
+              } else {
+                setChatHistory((prev) =>
+                  prev.map((entry, idx) =>
+                    idx === prev.length - 1 && entry.isStreaming
+                      ? { ...entry, content: entry.content + chunk.content }
+                      : entry
+                  )
+                );
+              }
             }
             break;
 
@@ -434,13 +471,27 @@ Available models: ${modelNames.join(", ")}`,
       }
       if (key.tab || key.return) {
         const selectedModel = availableModels[selectedModelIndex];
-        agent.setModel(selectedModel.model);
-        const confirmEntry: ChatEntry = {
-          type: "assistant",
-          content: `✓ Switched to model: ${selectedModel.model}`,
-          timestamp: new Date(),
-        };
-        setChatHistory((prev) => [...prev, confirmEntry]);
+        
+        // Handle async model switching
+        (async () => {
+          try {
+            await agent.setModel(selectedModel.model);
+            const confirmEntry: ChatEntry = {
+              type: "assistant",
+              content: `✓ Switched to model: ${selectedModel.model}`,
+              timestamp: new Date(),
+            };
+            setChatHistory((prev) => [...prev, confirmEntry]);
+          } catch (error: any) {
+            const errorEntry: ChatEntry = {
+              type: "assistant",
+              content: `Error switching to model: ${error.message}`,
+              timestamp: new Date(),
+            };
+            setChatHistory((prev) => [...prev, errorEntry]);
+          }
+        })();
+        
         setShowModelSelection(false);
         setSelectedModelIndex(0);
         return;
